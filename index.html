@@ -2,147 +2,53 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Vandra — KML Map (single world + fog toggle)</title>
+  <title>Vandra — KML test</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-
-  <!-- Leaflet -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-
-  <!-- KML -> GeoJSON -->
   <script src="https://unpkg.com/@tmcw/togeojson@4.8.0/dist/togeojson.umd.js"></script>
-  <!-- Turf for geodesic circles (reveal holes) -->
-  <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
-
-  <style>
-    html, body, #map { height: 100%; margin: 0; }
-    .leaflet-container { background: #cfd8dc; }
-    .ui {
-      position: absolute; z-index: 1000; top: 12px; left: 12px;
-      background: rgba(18,18,18,.8); color: #fff; padding: 8px 10px; border-radius: 12px;
-      font: 14px system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-      display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
-    }
-    .btn { cursor: pointer; background:#5b8cff; color:#fff; border:0; padding:6px 10px; border-radius:8px; }
-    .btn.secondary { background:#444; }
-    .slider { width: 160px; }
-    .hint { opacity:.85 }
-  </style>
+  <style>html,body,#map{height:100%;margin:0}.leaflet-container{background:#cfd8dc}</style>
 </head>
 <body>
   <div id="map"></div>
-
-  <div class="ui">
-    <label><input id="toggleFog" type="checkbox" checked> Fog on</label>
-    <span class="hint">• Click to reveal • Radius:</span>
-    <input id="radius" class="slider" type="range" min="3" max="120" value="20" />
-    <span id="rval" class="hint">20 km</span>
-    <button id="gps" class="btn">📍 GPS check-in</button>
-    <button id="reset" class="btn secondary">Reset fog</button>
-  </div>
-
   <script>
-    // ---- 1) Map: single world (no side-by-side repeats) ----
-    const worldBounds = [[-85, -180], [85, 180]]; // clamp a bit from the poles
-    const map = L.map('map', {
-      center: [20, 0],
-      zoom: 3,
-      worldCopyJump: false,      // <- stop jumping across copies
-      maxBounds: worldBounds,    // <- keep panning inside the world
-      maxBoundsViscosity: 1.0    // <- rubber-band at edges
-    });
-
-    // Clean basemap (OSM). noWrap:true prevents tile repeating.
+    // 1) Base map
+    const map = L.map('map', { center:[20,0], zoom:3, worldCopyJump:false });
     L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      attribution: '&copy; OpenStreetMap contributors',
-      noWrap: true,
-      bounds: worldBounds
+      attribution:'&copy; OpenStreetMap contributors', noWrap:true
     }).addTo(map);
 
-    // ---- 2) Load your KML and fit to it ----
-    (async function loadKML(){
+    // 2) FETCH YOUR EXACT KML URL (capital V in /Vandra/)
+    const KML_URL = 'https://vandraatishay.github.io/Vandra/vandra.kml';
+
+    (async () => {
       try {
-        const res = await fetch('https://vandraatishay.github.io/Vandra/vandra.kml?t=' + Date.now(), { cache: 'no-store' });
+        const res = await fetch(KML_URL + '?t=' + Date.now(), { cache:'no-store' });
+        if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + res.statusText);
         const text = await res.text();
+
         const kml = new DOMParser().parseFromString(text, 'text/xml');
         const gj = toGeoJSON.kml(kml);
-        if (gj.features && gj.features.length) {
-          const layer = L.geoJSON(gj, {
-            pointToLayer: (f, latlng) => L.circleMarker(latlng, {
-              radius: 5, color:'#1565c0', fillColor:'#42a5f5', fillOpacity:0.9, weight:1
-            }).bindPopup(f.properties?.name || 'Placemark'),
-            style: () => ({ color:'#2e7d32', weight:2, fillColor:'#66bb6a', fillOpacity:0.4 })
-          }).addTo(map);
-          try { map.fitBounds(layer.getBounds(), { padding:[20,20] }); } catch {}
-          console.log('KML features:', gj.features.length);
-        } else {
-          console.log('KML loaded, but it has no features yet.');
+        console.log('KML features:', gj.features?.length || 0);
+
+        if (!gj.features || gj.features.length === 0) {
+          alert('KML loaded but has 0 drawable features (no Placemarks/Lines/Polygons).');
+          return;
         }
+
+        const layer = L.geoJSON(gj, {
+          pointToLayer:(f, latlng)=>L.circleMarker(latlng,{
+            radius:5, color:'#1565c0', fillColor:'#42a5f5', fillOpacity:0.9, weight:1
+          }).bindPopup(f.properties?.name || 'Placemark'),
+          style:()=>({ color:'#2e7d32', weight:2, fillColor:'#66bb6a', fillOpacity:0.4 })
+        }).addTo(map);
+
+        try { map.fitBounds(layer.getBounds(), { padding:[20,20] }); } catch {}
       } catch (e) {
-        console.error('Failed to load vandra.kml', e);
-        alert('Could not load vandra.kml from the repo root.');
+        console.error('KML load failed', e);
+        alert('Could not fetch KML: ' + e.message + '\nURL: ' + KML_URL);
       }
     })();
-
-    // ---- 3) Fog-of-war overlay (toggleable) ----
-    // Put fog on its own pane so it always sits above tiles and KML.
-    map.createPane('fogPane');
-    map.getPane('fogPane').style.zIndex = 650;
-    map.getPane('fogPane').style.pointerEvents = 'none';
-
-    // Outer ring covers almost the whole world (lat, lng order)
-    const worldRingLatLng = [
-      [ 85, -179.999], [ 85, 179.999],
-      [-85,  179.999], [-85, -179.999],
-      [ 85, -179.999]
-    ];
-
-    const holesLatLng = []; // each hole = array of [lat,lng]
-    let fog = L.polygon([worldRingLatLng], {
-      pane: 'fogPane',
-      color: '#000', weight: 0,
-      fillColor: '#000', fillOpacity: 0.62,
-      interactive: false
-    }).addTo(map);
-
-    function lngLatRingToLatLng(ringLngLat) {
-      return ringLngLat.map(([lng, lat]) => [lat, lng]);
-    }
-    function rerenderFog() { fog.setLatLngs([worldRingLatLng, ...holesLatLng]); }
-
-    function addHole(lat, lng, kmRadius = 20) {
-      const circle = turf.circle([lng, lat], kmRadius, { steps: 128, units: 'kilometers' });
-      const ringLatLng = lngLatRingToLatLng(circle.geometry.coordinates[0]);
-      holesLatLng.push(ringLatLng);
-      rerenderFog();
-      // tiny visual ping (no fill)
-      L.circle([lat, lng], { radius: kmRadius*1000, color:'#5b8cff', weight:1, fillOpacity:0 }).addTo(map);
-    }
-
-    // UI
-    const radius = document.getElementById('radius');
-    const rval = document.getElementById('rval');
-    const toggleFog = document.getElementById('toggleFog');
-    rval.textContent = `${radius.value} km`;
-    radius.addEventListener('input', () => rval.textContent = `${radius.value} km`);
-
-    map.on('click', (e) => { if (toggleFog.checked) addHole(e.latlng.lat, e.latlng.lng, Number(radius.value)); });
-
-    document.getElementById('gps').onclick = () => {
-      if (!navigator.geolocation) return alert('Geolocation not supported.');
-      navigator.geolocation.getCurrentPosition(
-        ({ coords }) => {
-          const { latitude, longitude } = coords;
-          map.flyTo([latitude, longitude], Math.max(map.getZoom(), 7), { duration: 0.7 });
-          if (toggleFog.checked) addHole(latitude, longitude, Number(radius.value));
-        },
-        (err) => alert('GPS failed: ' + err.message),
-        { enableHighAccuracy: true, timeout: 10000 }
-      );
-    };
-
-    document.getElementById('reset').onclick = () => { holesLatLng.length = 0; rerenderFog(); };
-    toggleFog.onchange = () => { fog.setStyle({ fillOpacity: toggleFog.checked ? 0.62 : 0.0 }); };
   </script>
 </body>
 </html>
