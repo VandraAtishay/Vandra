@@ -102,8 +102,8 @@
     const radiusEl = document.getElementById('radius');
     const rval = document.getElementById('rval');
     const toggleFog = document.getElementById('toggleFog');
-    rval.textContent = ${radiusEl.value} km;
-    radiusEl.addEventListener('input', () => { rval.textContent = ${radiusEl.value} km; });
+    rval.textContent = `${radiusEl.value} km`;
+    radiusEl.addEventListener('input', () => { rval.textContent = `${radiusEl.value} km`; });
 
     map.on('click', (e) => {
       if (!toggleFog.checked) return;
