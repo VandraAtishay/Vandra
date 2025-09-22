@@ -2,30 +2,33 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Vandra — Fog of War</title>
+  <title>Vandra — Fog of War (Google Earth 3D)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
 
-  <!-- Leaflet (free) -->
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-
-  <!-- Turf.js for geodesic circles (free) -->
+  <!-- Turf.js for geodesic circles -->
   <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
 
   <style>
     html, body, #map { height: 100%; margin: 0; }
-    .leaflet-container { background: #cfd8dc; }
     .ui {
       position: absolute; z-index: 1000; top: 12px; left: 12px;
       background: rgba(18,18,18,.85); color: #fff; padding: 8px 10px; border-radius: 12px;
       font: 14px system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
       display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
       box-shadow: 0 6px 20px rgba(0,0,0,.25);
+      user-select: none;
     }
     .btn { cursor: pointer; background:#5b8cff; color:#fff; border:0; padding:6px 10px; border-radius:8px; }
     .btn.secondary { background:#444; }
     .slider { width: 160px; }
     .hint { opacity: .85 }
+    /* helper to show last ping briefly */
+    .ping {
+      border: 1px solid #5b8cff; border-radius: 999px;
+      box-shadow: 0 0 0 2px rgba(91,140,255,.25) inset;
+      animation: fade 1.6s ease-out forwards;
+    }
+    @keyframes fade { from{opacity:1} to{opacity:0} }
   </style>
 </head>
 <body>
@@ -38,107 +41,87 @@
     <span id="rval" class="hint">20 km</span>
     <button id="gps" class="btn">📍 GPS check-in</button>
     <button id="reset" class="btn secondary">Reset fog</button>
+    <button id="tilt" class="btn secondary">Tilt/Rotate</button>
   </div>
 
+  <!-- Google Maps JS (Vector / WebGL). Replace KEY. Optional: add &map_ids=MAP_ID if you have one -->
+  <script async
+    src="https://maps.googleapis.com/maps/api/js?key=YOUR_GOOGLE_MAPS_API_KEY&v=weekly&callback=init">
+  </script>
+
   <script>
-    // ---- Map: single world (no repeating copies) ----
-    const worldBounds = [[-85, -180], [85, 180]];
-    const map = L.map('map', {
-      center: [20, 0],
-      zoom: 3,
-      worldCopyJump: false,
-      maxBounds: worldBounds,
-      maxBoundsViscosity: 1.0
-    });
+    let map, fogPoly;
+    const STORAGE_KEY = 'vandra_fog_v1';
 
-    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      attribution: '&copy; OpenStreetMap contributors',
-      noWrap: true,
-      bounds: worldBounds
-    }).addTo(map);
-
-    // ---- Fog-of-war overlay (world polygon with holes) ----
-    map.createPane('fogPane');
-    map.getPane('fogPane').style.zIndex = 650;
-    map.getPane('fogPane').style.pointerEvents = 'none';
-
-    const outerRing = [
-      [ 85, -179.999], [ 85, 179.999],
-      [-85,  179.999], [-85, -179.999],
-      [ 85, -179.999]
+    // Outer world ring (counter-clockwise). Use ±179.999 to avoid antimeridian ambiguity.
+    const outerRingLngLat = [
+      [-179.999,  85.0],
+      [ 179.999,  85.0],
+      [ 179.999, -85.0],
+      [-179.999, -85.0],
+      [-179.999,  85.0]
     ];
 
-    // We keep TWO structures:
-    // 1) holesLatLng: rings used by Leaflet for rendering
-    // 2) holesMeta:   compact list of {lat,lng,r} we store in localStorage
+    // Render rings are LatLngLiteral[] (lat, lng). Meta is compact {lat,lng,r}.
     const holesLatLng = [];
     const holesMeta = [];
 
-    let fog = L.polygon([outerRing], {
-      pane: 'fogPane',
-      color: '#000', weight: 0,
-      fillColor: '#000', fillOpacity: 0.62,
-      interactive: false
-    }).addTo(map);
-
-    const toLatLngRing = (ringLngLat) => ringLngLat.map(([lng, lat]) => [lat, lng]);
-
-    function rerenderFog() {
-      fog.setLatLngs([outerRing, ...holesLatLng]);
-      saveProgress();
-    }
-
-    function addHole(lat, lng, kmRadius = 20, {record=true, ping=true} = {}) {
-      const circle = turf.circle([lng, lat], kmRadius, { steps: 128, units: 'kilometers' });
-      const ringLatLng = toLatLngRing(circle.geometry.coordinates[0]);
-      holesLatLng.push(ringLatLng);
-      if (record) holesMeta.push({ lat, lng, r: kmRadius });
-      rerenderFog();
-
-      if (ping) L.circle([lat, lng], { radius: kmRadius * 1000, color:'#5b8cff', weight:1, fillOpacity:0 }).addTo(map);
-    }
-
-    // ---- UI wiring ----
+    // UI refs
     const radiusEl = document.getElementById('radius');
     const rval = document.getElementById('rval');
     const toggleFog = document.getElementById('toggleFog');
-    rval.textContent = `${radiusEl.value} km`;
-    radiusEl.addEventListener('input', () => { rval.textContent = `${radiusEl.value} km`; });
 
-    map.on('click', (e) => {
-      if (!toggleFog.checked) return;
-      addHole(e.latlng.lat, e.latlng.lng, Number(radiusEl.value));
-    });
+    function toLatLng(ringLngLat) {
+      return ringLngLat.map(([lng, lat]) => ({ lat, lng }));
+    }
 
-    document.getElementById('gps').onclick = () => {
-      if (!navigator.geolocation) return alert('Geolocation not supported in this browser.');
-      navigator.geolocation.getCurrentPosition(
-        ({ coords }) => {
-          const { latitude, longitude } = coords;
-          map.flyTo([latitude, longitude], Math.max(map.getZoom(), 7), { duration: 0.7 });
-          if (toggleFog.checked) addHole(latitude, longitude, Number(radiusEl.value));
-        },
-        (err) => alert('GPS failed: ' + err.message),
-        { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
-      );
-    };
-
-    document.getElementById('reset').onclick = () => {
-      holesLatLng.length = 0;
-      holesMeta.length = 0;
-      rerenderFog();
-      localStorage.removeItem('vandra_fog_v1');
-    };
-
-    toggleFog.onchange = () => {
-      fog.setStyle({ fillOpacity: toggleFog.checked ? 0.62 : 0.0 });
-    };
-
-    // ---- Persistence (auto-save) ----
-    const STORAGE_KEY = 'vandra_fog_v1';
+    function makeCircleRing(lat, lng, kmRadius) {
+      const circle = turf.circle([lng, lat], kmRadius, { steps: 128, units: 'kilometers' });
+      return circle.geometry.coordinates[0].map(([lng2, lat2]) => ({ lat: lat2, lng: lng2 }));
+    }
 
     function saveProgress() {
       try { localStorage.setItem(STORAGE_KEY, JSON.stringify(holesMeta)); } catch {}
+    }
+
+    function rebuildFogPolygon() {
+      // Google Maps supports polygon holes by passing an array of rings: [outer, hole1, hole2, ...]
+      const paths = [ toLatLng(outerRingLngLat), ...holesLatLng ];
+      if (!fogPoly) {
+        fogPoly = new google.maps.Polygon({
+          paths,
+          strokeOpacity: 0,
+          fillColor: '#000000',
+          fillOpacity: toggleFog.checked ? 0.62 : 0.0,
+          map,
+        });
+      } else {
+        fogPoly.setPaths(paths);
+        fogPoly.setOptions({ fillOpacity: toggleFog.checked ? 0.62 : 0.0 });
+      }
+      saveProgress();
+    }
+
+    function addHole(lat, lng, kmRadius = 20, { record = true, ping = true } = {}) {
+      const ring = makeCircleRing(lat, lng, kmRadius);
+      holesLatLng.push(ring);
+      if (record) holesMeta.push({ lat, lng, r: kmRadius });
+      rebuildFogPolygon();
+
+      if (ping) {
+        // Draw a transient ping using a non-filled circle overlay
+        const pingCircle = new google.maps.Circle({
+          center: { lat, lng },
+          radius: kmRadius * 1000,
+          strokeColor: '#5b8cff',
+          strokeOpacity: 1,
+          strokeWeight: 1,
+          fillOpacity: 0,
+          map
+        });
+        // Fade it out
+        setTimeout(() => pingCircle.setMap(null), 1600);
+      }
     }
 
     function loadProgress() {
@@ -147,11 +130,78 @@
         if (!raw) return;
         const saved = JSON.parse(raw);
         if (!Array.isArray(saved)) return;
-        saved.forEach(({lat,lng,r}) => addHole(lat, lng, r, {record:false, ping:false}));
+        saved.forEach(({ lat, lng, r }) => addHole(lat, lng, r, { record: false, ping: false }));
       } catch {}
     }
 
-    loadProgress(); // rebuild fog holes from last session
+    function attachUI() {
+      // radius display
+      const setRval = () => { rval.textContent = `${radiusEl.value} km`; };
+      setRval();
+      radiusEl.addEventListener('input', setRval);
+
+      // toggle fog visibility
+      toggleFog.addEventListener('change', () => rebuildFogPolygon());
+
+      // map click to reveal
+      map.addListener('click', (e) => {
+        if (!toggleFog.checked) return;
+        const km = Number(radiusEl.value);
+        addHole(e.latLng.lat(), e.latLng.lng(), km);
+      });
+
+      // GPS button
+      document.getElementById('gps').onclick = () => {
+        if (!navigator.geolocation) return alert('Geolocation not supported in this browser.');
+        navigator.geolocation.getCurrentPosition(
+          ({ coords }) => {
+            const { latitude, longitude } = coords;
+            const pos = { lat: latitude, lng: longitude };
+            map.panTo(pos);
+            if (map.getZoom() < 7) map.setZoom(7);
+            if (toggleFog.checked) addHole(latitude, longitude, Number(radiusEl.value));
+          },
+          (err) => alert('GPS failed: ' + err.message),
+          { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+        );
+      };
+
+      // Reset button
+      document.getElementById('reset').onclick = () => {
+        holesLatLng.length = 0;
+        holesMeta.length = 0;
+        rebuildFogPolygon();
+        localStorage.removeItem(STORAGE_KEY);
+      };
+
+      // Simple tilt/rotate demo
+      let tilted = false;
+      document.getElementById('tilt').onclick = () => {
+        tilted = !tilted;
+        map.setTilt(tilted ? 67.5 : 0);           // enter/exit 3D
+        map.setHeading(tilted ? 30 : 0);          // a bit of rotation
+      };
+    }
+
+    // Init callback for Google Maps
+    window.init = function init() {
+      map = new google.maps.Map(document.getElementById('map'), {
+        center: { lat: 20, lng: 0 },
+        zoom: 3,
+        mapTypeId: 'satellite',      // Earth-like imagery (you can try 'hybrid' too)
+        disableDefaultUI: false,
+        gestureHandling: 'greedy',   // easier trackpad rotate/tilt
+        tilt: 0,                     // start flat; toggle with the button
+        heading: 0
+        // If you have a vector mapId, add: mapId: 'YOUR_VECTOR_MAP_ID'
+      });
+
+      // Enable scroll + ctrl/drag rotate on desktops
+      // Users can hold Shift+Drag to tilt/rotate, or two-finger drag on trackpads.
+      attachUI();
+      rebuildFogPolygon();
+      loadProgress();
+    };
   </script>
 </body>
 </html>
