@@ -62,7 +62,7 @@
     // ---- 2) Load your KML and fit to it ----
     (async function loadKML(){
       try {
-        const res = await fetch('vandra.kml', { cache:'no-store' });
+        const res = await fetch('https://vandraatishay.github.io/Vandra/vandra.kml?t=' + Date.now(), { cache: 'no-store' });
         const text = await res.text();
         const kml = new DOMParser().parseFromString(text, 'text/xml');
         const gj = toGeoJSON.kml(kml);
