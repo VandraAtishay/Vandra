@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2"
+     xmlns:gx="http://www.google.com/kml/ext/2.2"
+     xmlns:kml="http://www.opengis.net/kml/2.2"
+     xmlns:atom="http://www.w3.org/2005/Atom">
+  <Document>
+    <name>Vandra</name>
+
+    <!-- Test Placemark (Istanbul) -->
+    <Placemark>
+      <name>Vandra Test Pin</name>
+      <Point><coordinates>28.9784,41.0082,0</coordinates></Point>
+    </Placemark>
+
+    <!-- Example polygon near London (semi-transparent green) -->
+    <Placemark>
+      <name>Test Area</name>
+      <Style>
+        <!-- KML color = aabbggrr (alpha, blue, green, red) -->
+        <PolyStyle><color>7d00ff00</color></PolyStyle>
+        <LineStyle><color>ff00aa00</color><width>2</width></LineStyle>
+      </Style>
+      <Polygon>
+        <outerBoundaryIs><LinearRing>
+          <coordinates>
+            -0.2,51.5,0  -0.2,51.7,0  0.0,51.7,0  0.0,51.5,0  -0.2,51.5,0
+          </coordinates>
+        </LinearRing></outerBoundaryIs>
+      </Polygon>
+    </Placemark>
+
+  </Document>
+</kml>
