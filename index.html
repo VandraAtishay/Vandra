@@ -4,20 +4,21 @@
   <meta charset="utf-8" />
   <title>Vandra — 3D Globe (Fog of War)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <!-- CesiumJS (free) -->
-  <link href="https://unpkg.com/cesium@1.120.0/Build/Cesium/Widgets/widgets.css" rel="stylesheet" />
+
+  <!-- Cesium (3D globe) -->
+  <link rel="stylesheet" href="https://unpkg.com/cesium@1.120.0/Build/Cesium/Widgets/widgets.css">
   <style>
-    html, body, #cesiumContainer { width:100%; height:100%; margin:0; padding:0; overflow:hidden; background:#000; }
-    .ui {
+    html,body,#cesiumContainer { width:100%; height:100%; margin:0; padding:0; overflow:hidden; background:#000; }
+    .ui{
       position:absolute; z-index:10; top:12px; left:12px; display:flex; gap:10px; align-items:center; flex-wrap:wrap;
       background:rgba(18,18,18,.85); color:#fff; padding:8px 10px; border-radius:12px; font:14px system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
       box-shadow:0 6px 20px rgba(0,0,0,.25);
     }
-    .btn { cursor:pointer; background:#5b8cff; color:#fff; border:0; padding:6px 10px; border-radius:8px; }
-    .btn.secondary { background:#444; }
-    .slider { width:160px; }
-    .hint { opacity:.85 }
-    .toast { position:absolute; right:12px; top:12px; z-index:11; background:#ffebe9; color:#8a1e15; border:1px solid #f0c1b3; padding:8px 10px; border-radius:10px; font:12px/1.3 system-ui; display:none; }
+    .btn{cursor:pointer; background:#5b8cff; color:#fff; border:0; padding:6px 10px; border-radius:8px;}
+    .btn.secondary{background:#444;}
+    .slider{width:160px;}
+    .hint{opacity:.85}
+    .toast{position:absolute; right:12px; top:12px; z-index:11; background:#ffebe9; color:#8a1e15; border:1px solid #f0c1b3; padding:8px 10px; border-radius:10px; font:12px/1.3 system-ui; display:none;}
   </style>
 </head>
 <body>
@@ -34,180 +35,12 @@
 
   <div id="toast" class="toast"></div>
 
+  <!-- IMPORTANT: set base URL so Cesium can load its workers/assets -->
+  <script>window.CESIUM_BASE_URL = "https://unpkg.com/cesium@1.120.0/Build/Cesium/";</script>
   <script src="https://unpkg.com/cesium@1.120.0/Build/Cesium/Cesium.js"></script>
   <script>
-    // ---------- Helpers ----------
-    const toast = (msg) => { const t = document.getElementById('toast'); t.textContent = msg; t.style.display='block'; setTimeout(()=>t.style.display='none', 2500); };
+    // ---- helpers ----
+    const toast = (m)=>{const t=document.getElementById('toast');t.textContent=m;t.style.display='block';setTimeout(()=>t.style.display='none',2500)};
 
-    // Geodesic circle on the WGS84 ellipsoid (returns [ [lng,lat], ... ] closed ring)
-    function geodesicCircle(lonDeg, latDeg, radiusKm, steps = 128) {
-      const R = 6371.0088;                         // mean Earth radius (km)
-      const d = radiusKm / R;                      // angular distance (radians)
-      const lat0 = Cesium.Math.toRadians(latDeg);
-      const lon0 = Cesium.Math.toRadians(lonDeg);
-      const ring = [];
-      for (let i = 0; i <= steps; i++) {
-        const brg = (i / steps) * Cesium.Math.TWO_PI;
-        const sinLat = Math.sin(lat0) * Math.cos(d) + Math.cos(lat0) * Math.sin(d) * Math.cos(brg);
-        const lat = Math.asin(sinLat);
-        const y = Math.sin(brg) * Math.sin(d) * Math.cos(lat0);
-        const x = Math.cos(d) - Math.sin(lat0) * Math.sin(lat);
-        const lon = lon0 + Math.atan2(y, x);
-        let lonDegNorm = Cesium.Math.toDegrees(lon);
-        lonDegNorm = ((lonDegNorm + 540) % 360) - 180; // normalize to [-180,180]
-        ring.push([lonDegNorm, Cesium.Math.toDegrees(lat)]);
-      }
-      // Ensure closed ring
-      const first = ring[0], last = ring[ring.length-1];
-      if (first[0] !== last[0] || first[1] !== last[1]) ring.push(first);
-      // Reverse to mark it as a hole (clockwise) for robustness
-      return ring.reverse();
-    }
-
-    function ringToDegreesArray(ringLngLat) { // [ [lng,lat], ... ] -> flat [lng,lat,lng,lat,...]
-      const flat = [];
-      for (const [lng, lat] of ringLngLat) { flat.push(lng, lat); }
-      return flat;
-    }
-
-    // ---------- Cesium Viewer (free OSM imagery, no ion token) ----------
-    const viewer = new Cesium.Viewer('cesiumContainer', {
-      terrain: new Cesium.EllipsoidTerrainProvider(), // 3D globe without paid terrain
-      baseLayerPicker: false, geocoder: false, homeButton: false, navigationHelpButton: false,
-      animation: false, timeline: false, sceneModePicker: false,
-      selectionIndicator: false, infoBox: false
-    });
-
-    // Replace default imagery with OpenStreetMap (free)
-    viewer.imageryLayers.removeAll();
-    viewer.imageryLayers.addImageryProvider(new Cesium.UrlTemplateImageryProvider({
-      url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-      credit: '© OpenStreetMap contributors'
-    }));
-
-    // Make sure the globe is visible (in case of any previous issues)
-    viewer.scene.globe.show = true;
-    viewer.scene.skyAtmosphere.show = true;
-
-    // Start at a nice whole-earth view
-    viewer.camera.setView({
-      destination: Cesium.Cartesian3.fromDegrees(-30, 20, 2.2e7),
-      orientation: { heading: Cesium.Math.toRadians(-20), pitch: Cesium.Math.toRadians(-35), roll: 0 }
-    });
-
-    // ---------- Fog-of-war polygon (world cover with holes) ----------
-    // Outer world ring (avoid exact poles to keep polygon stable)
-    const worldRingDeg = [
-      [-179.999, -85], [ 179.999, -85], [ 179.999, 85], [ -179.999, 85], [-179.999, -85]
-    ];
-    const holesRings = []; // array of rings [ [lng,lat]... ] (each closed, clockwise)
-
-    function buildFogHierarchy() {
-      const outer = new Cesium.PolygonHierarchy(
-        Cesium.Cartesian3.fromDegreesArray(ringToDegreesArray(worldRingDeg)),
-        holesRings.map(r => new Cesium.PolygonHierarchy(
-          Cesium.Cartesian3.fromDegreesArray(ringToDegreesArray(r))
-        ))
-      );
-      return outer;
-    }
-
-    const fogEntity = viewer.entities.add({
-      name: 'Fog of War',
-      polygon: {
-        hierarchy: buildFogHierarchy(),
-        material: new Cesium.Color(0, 0, 0, 0.62), // semi-transparent black
-        perPositionHeight: false
-      }
-    });
-
-    function rerenderFog() {
-      fogEntity.polygon.hierarchy = buildFogHierarchy();
-      saveProgress();
-    }
-
-    function addRevealHole(lat, lon, radiusKm) {
-      const ring = geodesicCircle(lon, lat, radiusKm, 128);
-      holesRings.push(ring);
-      rerenderFog();
-
-      // small visual ping
-      viewer.entities.add({
-        position: Cesium.Cartesian3.fromDegrees(lon, lat),
-        point: { color: Cesium.Color.fromCssColorString('#5b8cff'), pixelSize: 6, outlineColor: Cesium.Color.fromCssColorString('#2d5bff'), outlineWidth: 1 }
-      });
-      viewer.camera.flyTo({ destination: Cesium.Cartesian3.fromDegrees(lon, lat, 1.2e6), duration: 1.0 });
-    }
-
-    // ---------- UI wiring ----------
-    const radiusEl = document.getElementById('radius');
-    const rval = document.getElementById('rval');
-    const toggleFog = document.getElementById('toggleFog');
-    rval.textContent = `${radiusEl.value} km`;
-    radiusEl.addEventListener('input', () => { rval.textContent = `${radiusEl.value} km`; });
-
-    // Click to reveal
-    const handler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
-    handler.setInputAction((movement) => {
-      if (!toggleFog.checked) return;
-      const cartesian = viewer.scene.pickPosition(movement.position) ||
-                        viewer.camera.pickEllipsoid(movement.position, Cesium.Ellipsoid.WGS84);
-      if (!cartesian) return;
-      const carto = Cesium.Ellipsoid.WGS84.cartesianToCartographic(cartesian);
-      const lat = Cesium.Math.toDegrees(carto.latitude);
-      const lon = Cesium.Math.toDegrees(carto.longitude);
-      addRevealHole(lat, lon, Number(radiusEl.value));
-    }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
-
-    // GPS check-in (HTTPS on GitHub Pages so this works)
-    document.getElementById('gps').onclick = () => {
-      if (!navigator.geolocation) return toast('Geolocation not supported.');
-      navigator.geolocation.getCurrentPosition(
-        ({ coords }) => addRevealHole(coords.latitude, coords.longitude, Number(radiusEl.value)),
-        (err) => toast('GPS failed: ' + err.message),
-        { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
-      );
-    };
-
-    // Toggle fog visibility
-    toggleFog.onchange = () => {
-      fogEntity.polygon.material = toggleFog.checked ? new Cesium.Color(0,0,0,0.62) : new Cesium.Color(0,0,0,0.0);
-    };
-
-    // Reset fog
-    document.getElementById('reset').onclick = () => {
-      holesRings.length = 0;
-      rerenderFog();
-      localStorage.removeItem('vandra_fog_v1');
-    };
-
-    // ---------- Persistence ----------
-    const STORAGE_KEY = 'vandra_fog_v1';
-    function saveProgress() {
-      try {
-        const compact = holesRings.map(r => ({ // store as center + radius approximation (optional) or raw ring
-          ring: r
-        }));
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(compact));
-      } catch {}
-    }
-    function loadProgress() {
-      try {
-        const raw = localStorage.getItem(STORAGE_KEY);
-        if (!raw) return;
-        const saved = JSON.parse(raw);
-        if (!Array.isArray(saved)) return;
-        saved.forEach(({ ring }) => { if (Array.isArray(ring) && ring.length > 3) holesRings.push(ring); });
-        rerenderFog();
-      } catch {}
-    }
-    loadProgress();
-
-    // ---------- Tips if you see only stars ----------
-    // If the globe doesn't appear:
-    // - Ensure CSS sets #cesiumContainer to 100% height (it does).
-    // - Network blocks? Try a different browser or disable extensions that block CDN tiles.
-    // - Open DevTools Console for any errors.
-  </script>
-</body>
-</html>
+    // geodesic circle (lon,lat,km) -> clockwise ring [ [lng,lat], ... ]
+    function geodes
