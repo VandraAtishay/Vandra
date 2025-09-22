@@ -1,63 +1,157 @@
-<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>Vandra • Google Earth</title>
-    <style>
-      html, body {
-        height: 100%;
-        margin: 0;
-        background:#000; /* looks nicer while Earth loads */
-      }
-      /* full-bleed Earth */
-      #earth {
-        position: fixed;
-        inset: 0;
-        width: 100%;
-        height: 100%;
-        border: 0;
-      }
-      /* optional soft fog overlay to accent the look on top of Earth */
-      .fog {
-        pointer-events: none;
-        position: fixed;
-        inset: 0;
-        /* subtle radial + vertical fade; tweak if you want */
-        background:
-          radial-gradient(80% 60% at 50% 10%, rgba(255,255,255,0.15), rgba(255,255,255,0.00) 60%),
-          linear-gradient(to bottom, rgba(255,255,255,0.10), rgba(0,0,0,0.00) 40%, rgba(0,0,0,0.25));
-        mix-blend-mode: screen;
-      }
-      /* small helper chip (you can remove it) */
-      .chip {
-        position: fixed; left: 12px; bottom: 12px;
-        background: rgba(0,0,0,0.55); color: #fff;
-        padding: 8px 12px; border-radius: 999px; font: 13px/1.2 system-ui, sans-serif;
-      }
-    </style>
-  </head>
-  <body>
-    <iframe id="earth" allowfullscreen
-      src="">
-    </iframe>
-    <div class="fog"></div>
-    <div class="chip" id="locChip"></div>
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Vandra — Fog of War</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
 
-    <script>
-      // 👉 Set the place you want to fly to (plain text search works great)
-      // Examples: "Mount Fuji", "Seoul Tower", "Grand Canyon", "UT Austin"
-      const PLACE = "Mount Fuji";
+  <!-- Leaflet (free) -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
-      // Google Earth Web supports search URLs + embed mode
-      // This avoids any API keys and keeps the classic Earth look & 3D controls.
-      const earthUrl = `https://earth.google.com/web/search/${encodeURIComponent(PLACE)}?embed=true`;
+  <!-- Turf.js for geodesic circles (free) -->
+  <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
 
-      const iframe = document.getElementById("earth");
-      iframe.src = earthUrl;
+  <style>
+    html, body, #map { height: 100%; margin: 0; }
+    .leaflet-container { background: #cfd8dc; }
+    .ui {
+      position: absolute; z-index: 1000; top: 12px; left: 12px;
+      background: rgba(18,18,18,.85); color: #fff; padding: 8px 10px; border-radius: 12px;
+      font: 14px system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+      box-shadow: 0 6px 20px rgba(0,0,0,.25);
+    }
+    .btn { cursor: pointer; background:#5b8cff; color:#fff; border:0; padding:6px 10px; border-radius:8px; }
+    .btn.secondary { background:#444; }
+    .slider { width: 160px; }
+    .hint { opacity: .85 }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
 
-      // tiny label so you remember what it's flying to (remove if you like)
-      document.getElementById("locChip").textContent = PLACE;
-    </script>
-  </body>
+  <div class="ui">
+    <label><input id="toggleFog" type="checkbox" checked> Fog on</label>
+    <span class="hint">• Click to reveal • Radius:</span>
+    <input id="radius" class="slider" type="range" min="3" max="120" value="20" />
+    <span id="rval" class="hint">20 km</span>
+    <button id="gps" class="btn">📍 GPS check-in</button>
+    <button id="reset" class="btn secondary">Reset fog</button>
+  </div>
+
+  <script>
+    // ---- Map: single world (no repeating copies) ----
+    const worldBounds = [[-85, -180], [85, 180]];
+    const map = L.map('map', {
+      center: [20, 0],
+      zoom: 3,
+      worldCopyJump: false,
+      maxBounds: worldBounds,
+      maxBoundsViscosity: 1.0
+    });
+
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OpenStreetMap contributors',
+      noWrap: true,
+      bounds: worldBounds
+    }).addTo(map);
+
+    // ---- Fog-of-war overlay (world polygon with holes) ----
+    map.createPane('fogPane');
+    map.getPane('fogPane').style.zIndex = 650;
+    map.getPane('fogPane').style.pointerEvents = 'none';
+
+    const outerRing = [
+      [ 85, -179.999], [ 85, 179.999],
+      [-85,  179.999], [-85, -179.999],
+      [ 85, -179.999]
+    ];
+
+    // We keep TWO structures:
+    // 1) holesLatLng: rings used by Leaflet for rendering
+    // 2) holesMeta:   compact list of {lat,lng,r} we store in localStorage
+    const holesLatLng = [];
+    const holesMeta = [];
+
+    let fog = L.polygon([outerRing], {
+      pane: 'fogPane',
+      color: '#000', weight: 0,
+      fillColor: '#000', fillOpacity: 0.62,
+      interactive: false
+    }).addTo(map);
+
+    const toLatLngRing = (ringLngLat) => ringLngLat.map(([lng, lat]) => [lat, lng]);
+
+    function rerenderFog() {
+      fog.setLatLngs([outerRing, ...holesLatLng]);
+      saveProgress();
+    }
+
+    function addHole(lat, lng, kmRadius = 20, {record=true, ping=true} = {}) {
+      const circle = turf.circle([lng, lat], kmRadius, { steps: 128, units: 'kilometers' });
+      const ringLatLng = toLatLngRing(circle.geometry.coordinates[0]);
+      holesLatLng.push(ringLatLng);
+      if (record) holesMeta.push({ lat, lng, r: kmRadius });
+      rerenderFog();
+
+      if (ping) L.circle([lat, lng], { radius: kmRadius * 1000, color:'#5b8cff', weight:1, fillOpacity:0 }).addTo(map);
+    }
+
+    // ---- UI wiring ----
+    const radiusEl = document.getElementById('radius');
+    const rval = document.getElementById('rval');
+    const toggleFog = document.getElementById('toggleFog');
+    rval.textContent = `${radiusEl.value} km`;
+    radiusEl.addEventListener('input', () => { rval.textContent = `${radiusEl.value} km`; });
+
+    map.on('click', (e) => {
+      if (!toggleFog.checked) return;
+      addHole(e.latlng.lat, e.latlng.lng, Number(radiusEl.value));
+    });
+
+    document.getElementById('gps').onclick = () => {
+      if (!navigator.geolocation) return alert('Geolocation not supported in this browser.');
+      navigator.geolocation.getCurrentPosition(
+        ({ coords }) => {
+          const { latitude, longitude } = coords;
+          map.flyTo([latitude, longitude], Math.max(map.getZoom(), 7), { duration: 0.7 });
+          if (toggleFog.checked) addHole(latitude, longitude, Number(radiusEl.value));
+        },
+        (err) => alert('GPS failed: ' + err.message),
+        { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+      );
+    };
+
+    document.getElementById('reset').onclick = () => {
+      holesLatLng.length = 0;
+      holesMeta.length = 0;
+      rerenderFog();
+      localStorage.removeItem('vandra_fog_v1');
+    };
+
+    toggleFog.onchange = () => {
+      fog.setStyle({ fillOpacity: toggleFog.checked ? 0.62 : 0.0 });
+    };
+
+    // ---- Persistence (auto-save) ----
+    const STORAGE_KEY = 'vandra_fog_v1';
+
+    function saveProgress() {
+      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(holesMeta)); } catch {}
+    }
+
+    function loadProgress() {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (!raw) return;
+        const saved = JSON.parse(raw);
+        if (!Array.isArray(saved)) return;
+        saved.forEach(({lat,lng,r}) => addHole(lat, lng, r, {record:false, ping:false}));
+      } catch {}
+    }
+
+    loadProgress(); // rebuild fog holes from last session
+  </script>
+</body>
 </html>
