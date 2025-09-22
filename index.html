@@ -5,20 +5,20 @@
   <title>Vandra — 3D Globe (Fog of War)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
 
-  <!-- Cesium (3D globe) -->
-  <link rel="stylesheet" href="https://unpkg.com/cesium@1.120.0/Build/Cesium/Widgets/widgets.css">
+  <!-- Cesium (UMD build) -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/cesium@1.111.0/Build/Cesium/Widgets/widgets.css">
   <style>
-    html,body,#cesiumContainer { width:100%; height:100%; margin:0; padding:0; overflow:hidden; background:#000; }
+    html, body, #cesiumContainer { width:100%; height:100%; margin:0; padding:0; overflow:hidden; background:#000; }
     .ui{
       position:absolute; z-index:10; top:12px; left:12px; display:flex; gap:10px; align-items:center; flex-wrap:wrap;
       background:rgba(18,18,18,.85); color:#fff; padding:8px 10px; border-radius:12px; font:14px system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
       box-shadow:0 6px 20px rgba(0,0,0,.25);
     }
     .btn{cursor:pointer; background:#5b8cff; color:#fff; border:0; padding:6px 10px; border-radius:8px;}
-    .btn.secondary{background:#444;}
-    .slider{width:160px;}
-    .hint{opacity:.85}
-    .toast{position:absolute; right:12px; top:12px; z-index:11; background:#ffebe9; color:#8a1e15; border:1px solid #f0c1b3; padding:8px 10px; border-radius:10px; font:12px/1.3 system-ui; display:none;}
+    .btn.secondary{ background:#444; }
+    .slider{ width:160px; }
+    .hint{ opacity:.85 }
+    .warn{ position:absolute; right:12px; top:12px; z-index:11; background:#ffebe9; color:#8a1e15; border:1px solid #f0c1b3; padding:8px 10px; border-radius:10px; font:12px/1.35 system-ui; display:none; }
   </style>
 </head>
 <body>
@@ -33,14 +33,136 @@
     <button id="reset" class="btn secondary">Reset fog</button>
   </div>
 
-  <div id="toast" class="toast"></div>
+  <div id="warn" class="warn"></div>
 
-  <!-- IMPORTANT: set base URL so Cesium can load its workers/assets -->
-  <script>window.CESIUM_BASE_URL = "https://unpkg.com/cesium@1.120.0/Build/Cesium/";</script>
-  <script src="https://unpkg.com/cesium@1.120.0/Build/Cesium/Cesium.js"></script>
+  <!-- IMPORTANT: let Cesium find its workers/assets on the CDN -->
+  <script>window.CESIUM_BASE_URL = "https://cdn.jsdelivr.net/npm/cesium@1.111.0/Build/Cesium/";</script>
+  <script src="https://cdn.jsdelivr.net/npm/cesium@1.111.0/Build/Cesium/Cesium.js"></script>
   <script>
-    // ---- helpers ----
-    const toast = (m)=>{const t=document.getElementById('toast');t.textContent=m;t.style.display='block';setTimeout(()=>t.style.display='none',2500)};
+    // ---------- helpers ----------
+    const warn = (m)=>{const el=document.getElementById('warn'); el.textContent=m; el.style.display='block'; setTimeout(()=>el.style.display='none',3000);};
 
-    // geodesic circle (lon,lat,km) -> clockwise ring [ [lng,lat], ... ]
-    function geodes
+    // Basic capability check
+    if (!Cesium.FeatureDetection.supportsWebGL()) {
+      warn('WebGL not supported on this device/browser.');
+    }
+
+    // Geodesic circle (lon,lat in degrees; radius in km) -> clockwise ring [[lng,lat]...]
+    function geodesicCircle(lonDeg, latDeg, radiusKm, steps=128){
+      const R=6371.0088, d=radiusKm/R;
+      const lat0=Cesium.Math.toRadians(latDeg), lon0=Cesium.Math.toRadians(lonDeg);
+      const ring=[];
+      for(let i=0;i<=steps;i++){
+        const brg=(i/steps)*Cesium.Math.TWO_PI;
+        const sinLat=Math.sin(lat0)*Math.cos(d)+Math.cos(lat0)*Math.sin(d)*Math.cos(brg);
+        const lat=Math.asin(sinLat);
+        const y=Math.sin(brg)*Math.sin(d)*Math.cos(lat0);
+        const x=Math.cos(d)-Math.sin(lat0)*Math.sin(lat);
+        const lon=lon0+Math.atan2(y,x);
+        let L=Cesium.Math.toDegrees(lon); L=((L+540)%360)-180;
+        ring.push([L, Cesium.Math.toDegrees(lat)]);
+      }
+      const a=ring[0], b=ring[ring.length-1]; if(a[0]!==b[0]||a[1]!==b[1]) ring.push(a);
+      return ring.reverse(); // holes are clockwise
+    }
+    const flat = (ring)=>ring.flat(); // [[lng,lat]...] -> [lng,lat,...]
+
+    // ---------- Cesium viewer ----------
+    const viewer = new Cesium.Viewer('cesiumContainer', {
+      terrain: new Cesium.EllipsoidTerrainProvider(), // free (no ion token)
+      baseLayerPicker:false, geocoder:false, homeButton:false, navigationHelpButton:false,
+      animation:false, timeline:false, sceneModePicker:false, selectionIndicator:false, infoBox:false
+    });
+
+    // Use OpenStreetMap as imagery (free)
+    viewer.imageryLayers.removeAll();
+    viewer.imageryLayers.addImageryProvider(new Cesium.UrlTemplateImageryProvider({
+      url: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+      credit: "© OpenStreetMap contributors"
+    }));
+
+    viewer.scene.globe.show = true;
+    viewer.scene.skyAtmosphere.show = true;
+
+    // Nice starting view
+    viewer.camera.setView({
+      destination: Cesium.Cartesian3.fromDegrees(-30, 20, 2.2e7),
+      orientation: { heading: Cesium.Math.toRadians(-20), pitch: Cesium.Math.toRadians(-35), roll: 0 }
+    });
+
+    // ---------- Fog-of-war (world cover + holes) ----------
+    const worldRing = [ [-179.999,-85], [179.999,-85], [179.999,85], [-179.999,85], [-179.999,-85] ];
+    const holes = [];
+
+    function buildHierarchy(){
+      return new Cesium.PolygonHierarchy(
+        Cesium.Cartesian3.fromDegreesArray(flat(worldRing)),
+        holes.map(r => new Cesium.PolygonHierarchy(
+          Cesium.Cartesian3.fromDegreesArray(flat(r))
+        ))
+      );
+    }
+
+    const fog = viewer.entities.add({
+      polygon: {
+        hierarchy: buildHierarchy(),
+        material: new Cesium.Color(0,0,0,0.62),
+        perPositionHeight: false
+      }
+    });
+
+    function refreshFog(){ fog.polygon.hierarchy = buildHierarchy(); save(); }
+
+    function revealAt(lat, lon, km){
+      const ring = geodesicCircle(lon, lat, km, 128);
+      holes.push(ring);
+      refreshFog();
+
+      // small visual ping + fly
+      viewer.entities.add({
+        position: Cesium.Cartesian3.fromDegrees(lon,lat),
+        point:{ pixelSize:6, color:Cesium.Color.fromCssColorString("#5b8cff"),
+                outlineColor:Cesium.Color.fromCssColorString("#2d5bff"), outlineWidth:1 }
+      });
+      viewer.camera.flyTo({ destination: Cesium.Cartesian3.fromDegrees(lon,lat,1.2e6), duration:1.0 });
+    }
+
+    // ---------- UI wiring ----------
+    const radiusEl = document.getElementById('radius');
+    const rval = document.getElementById('rval');
+    const toggleFog = document.getElementById('toggleFog');
+    rval.textContent = `${radiusEl.value} km`;
+    radiusEl.addEventListener('input', ()=>rval.textContent=`${radiusEl.value} km`);
+
+    // click to reveal
+    const handler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
+    handler.setInputAction((movement)=>{
+      if(!toggleFog.checked) return;
+      const cartesian = viewer.scene.pickPosition(movement.position) ||
+                        viewer.camera.pickEllipsoid(movement.position, Cesium.Ellipsoid.WGS84);
+      if(!cartesian) return;
+      const c = Cesium.Ellipsoid.WGS84.cartesianToCartographic(cartesian);
+      revealAt(Cesium.Math.toDegrees(c.latitude), Cesium.Math.toDegrees(c.longitude), Number(radiusEl.value));
+    }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
+
+    // GPS
+    document.getElementById('gps').onclick = ()=>{
+      if(!navigator.geolocation) return warn('Geolocation not supported.');
+      navigator.geolocation.getCurrentPosition(
+        ({coords})=>revealAt(coords.latitude, coords.longitude, Number(radiusEl.value)),
+        (err)=>warn('GPS failed: '+err.message),
+        { enableHighAccuracy:true, timeout:10000, maximumAge:0 }
+      );
+    };
+
+    // toggle / reset
+    toggleFog.onchange = ()=>{ fog.polygon.material = toggleFog.checked ? new Cesium.Color(0,0,0,0.62) : new Cesium.Color(0,0,0,0.0); };
+    document.getElementById('reset').onclick = ()=>{ holes.length=0; refreshFog(); localStorage.removeItem('vandra_fog_v3'); };
+
+    // ---------- persistence ----------
+    const KEY='vandra_fog_v3';
+    const save = ()=>{ try{ localStorage.setItem(KEY, JSON.stringify(holes)); }catch{} };
+    (function load(){ try{ const raw=localStorage.getItem(KEY); if(!raw) return; const arr=JSON.parse(raw); if(Array.isArray(arr)) { holes.push(...arr); refreshFog(); } }catch{} })();
+  </script>
+</body>
+</html>
